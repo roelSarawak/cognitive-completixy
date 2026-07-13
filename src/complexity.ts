@@ -166,8 +166,13 @@ const FOR_HEADER_LOOKBEHIND_REGEX = /for\s*\(\s*$/;
 const DECLARATION_REGEXES = [
   /\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\b/g,
   /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g,
-  // ponytail: known-type allowlist for Apex/Java-style typed declarations; extend if a new type shows up.
-  /\b(?:String|Integer|Boolean|Double|Long|Object|Decimal|Id|Date|DateTime|Blob|List<[^;=()]*>|Map<[^;=()]*>|Set<[^;=()]*>)\s+([A-Za-z_$][\w$]*)\s*[=;]/g
+  // Apex/Java-style typed declarations and parameters: `Type name` (Type is
+  // PascalCase by convention) followed by = ; , or ) — no type allowlist to
+  // maintain, this covers built-ins, generics, and custom types alike.
+  /\b[A-Z][\w$]*(?:<[^;(){}]*>)?(?:\[\])?\s+([A-Za-z_$][\w$]*)\s*[=;,)]/g,
+  // Typed catch clause: `catch (Type name)` — parens don't end in = ; , so
+  // it needs its own pattern rather than reusing the one above.
+  /\bcatch\s*\(\s*[A-Z][\w$.]*\s+([A-Za-z_$][\w$]*)\s*\)/g
 ];
 
 function findCrypticIdentifierContributions(code: string): ComplexityContribution[] {
@@ -194,7 +199,7 @@ function findCrypticIdentifierContributions(code: string): ComplexityContributio
 
       const line = lineForIndex(lineStarts, nameIndex);
       contributions.push({
-        line: line + 1,
+        line,
         column: nameIndex - lineStarts[line],
         contribution: 1,
         description: `+1 cryptic identifier name '${name}' (consider a descriptive name)`
@@ -211,6 +216,9 @@ function findCrypticIdentifierContributions(code: string): ComplexityContributio
 // score has no single name to judge against.
 const DESCRIPTIVE_NAME_REGEX = /extract|parse|match|regex|pattern|valid|test|find|replace|sanitize|normalize/i;
 const REGEX_LITERAL_REGEX = /(^|[=([{,:!&|;]\s*|\breturn\s+)\/(?:[^\/\\\r\n]|\\.)+\/[a-z]*/g;
+// Apex/Java have no /pattern/ literal syntax — regex there is always
+// Pattern.compile("..."), so it needs its own detector.
+const PATTERN_COMPILE_REGEX = /\bPattern\s*\.\s*compile\s*\(/g;
 
 function findRegexNamingContributions(code: string, methodName?: string): ComplexityContribution[] {
   if (!methodName || DESCRIPTIVE_NAME_REGEX.test(methodName)) return [];
@@ -225,19 +233,32 @@ function findRegexNamingContributions(code: string, methodName?: string): Comple
     const slashIndex = match.index + match[1].length;
     const line = lineForIndex(lineStarts, slashIndex);
     contributions.push({
-      line: line + 1,
+      line,
       column: slashIndex - lineStarts[line],
       contribution: 2,
       description: `+2 inline regex in '${methodName}' — extract to a well-named function (e.g. extractX)`
     });
   }
 
+  PATTERN_COMPILE_REGEX.lastIndex = 0;
+  while ((match = PATTERN_COMPILE_REGEX.exec(clean)) !== null) {
+    const line = lineForIndex(lineStarts, match.index);
+    contributions.push({
+      line,
+      column: match.index - lineStarts[line],
+      contribution: 2,
+      description: `+2 inline Pattern.compile in '${methodName}' — extract to a well-named function (e.g. extractX)`
+    });
+  }
+
   return contributions;
 }
 
-// A method that runs a control-flow block and then keeps going with unrelated
-// logic is doing more than one thing, even without extra nesting. Detects
-// only the first top-level block, once per method (not per occurrence).
+// A method that runs a loop and then keeps going with unrelated logic is
+// doing more than one thing, even without extra nesting. `if`/`switch` are
+// deliberately excluded — a guard clause followed by more code is normal,
+// not a smell. Detects only the first top-level loop, once per method (not
+// per occurrence).
 function hasTrailingLogicAfterControlBlock(body: string): boolean {
   const clean = stripForStructure(body);
   const openBrace = clean.indexOf('{');
@@ -245,7 +266,7 @@ function hasTrailingLogicAfterControlBlock(body: string): boolean {
   const closeBrace = findMatchingBrace(clean, openBrace);
   if (closeBrace === -1) return false;
 
-  const controlRegex = /\b(?:if|for|while|switch|do)\b/g;
+  const controlRegex = /\b(?:for|while|do)\b/g;
   controlRegex.lastIndex = openBrace;
   const match = controlRegex.exec(clean);
   if (!match || match.index >= closeBrace) return false;
@@ -419,7 +440,7 @@ function tokenizeWithPositions(code: string): TokenWithPosition[] {
       
       tokens.push({
         token: match[0],
-        line: lineIndex + 1, // 1-based line numbers
+        line: lineIndex,
         column: match.index
       });
     }
@@ -532,6 +553,74 @@ function loopOnly(items) {
   const mixedMethods = findMethodComplexities(mixedSample);
   assert.strictEqual(mixedMethods.find(m => m.name === 'loopOnly')!.complexity, 1);
   assert.strictEqual(mixedMethods.find(m => m.name === 'mixedResponsibility')!.complexity, 4);
+
+  // Regression: a guard-clause `if` followed by more code (no loop) must NOT
+  // get the multi-responsibility bonus — that shape is normal, not a smell.
+  const guardSample = `
+function guardThenMore(a) {
+  if (a) {
+    return 1;
+  }
+  try {
+    doSomething();
+  } catch (Exception e) {
+    return 2;
+  }
+  if (a) {
+    return 3;
+  } else {
+    return 4;
+  }
+}
+`;
+  const guardMethods = findMethodComplexities(guardSample);
+  const guardMethod = guardMethods.find(m => m.name === 'guardThenMore')!;
+  assert.strictEqual(guardMethod.complexity, 5);
+  assert.ok(
+    !analyzeCognitiveComplexity(guardSample, 'guardThenMore').contributions.some(c => c.description.includes('mixes a control-flow block')),
+    'guard-clause-only method should not get the multi-responsibility bonus'
+  );
+
+  // Apex-style typed declarations are flagged without a type allowlist.
+  const apexDeclarationsSample = `
+function apexDeclarations() {
+  Document d;
+  Matcher m = getMatcher();
+  SObject s = getRecord();
+  try {
+    riskyCall();
+  } catch (Exception e) {
+    return;
+  }
+}
+`;
+  const apexMethods = findMethodComplexities(apexDeclarationsSample);
+  assert.strictEqual(apexMethods.find(m => m.name === 'apexDeclarations')!.complexity, 5);
+
+  // Apex/Java regex via Pattern.compile(...), not /pattern/ literal syntax.
+  const patternCompileSample = `
+function scan(body) {
+  Pattern pattern = Pattern.compile('abc');
+  return pattern;
+}
+
+function extractTags(body) {
+  Pattern pattern = Pattern.compile('abc');
+  return pattern;
+}
+`;
+  const patternMethods = findMethodComplexities(patternCompileSample);
+  assert.strictEqual(patternMethods.find(m => m.name === 'scan')!.complexity, 2);
+  assert.strictEqual(patternMethods.find(m => m.name === 'extractTags')!.complexity, 0);
+
+  // Line numbers must be 0-based (matching VS Code's Range/lineAt convention),
+  // not 1-based — the `if` is on source line index 1, not 2.
+  const lineNumberSample = `function f(a) {
+  if (a) return 1;
+}
+`;
+  const lineNumberContributions = analyzeCognitiveComplexity(lineNumberSample).contributions;
+  assert.strictEqual(lineNumberContributions.find(c => c.description.includes('if statement'))!.line, 1);
 
   console.log('complexity.ts self-check passed');
 }
