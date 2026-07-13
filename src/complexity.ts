@@ -9,7 +9,7 @@ export function calculateCognitiveComplexity(code: string): number {
   return analyzeCognitiveComplexity(code).totalComplexity;
 }
 
-export function analyzeCognitiveComplexity(code: string): {
+export function analyzeCognitiveComplexity(code: string, methodName?: string): {
   totalComplexity: number;
   contributions: ComplexityContribution[];
 } {
@@ -134,7 +134,128 @@ export function analyzeCognitiveComplexity(code: string): {
     }
   }
   
+  for (const c of findCrypticIdentifierContributions(code)) {
+    contributions.push(c);
+    complexity += c.contribution;
+  }
+
+  for (const c of findRegexNamingContributions(code, methodName)) {
+    contributions.push(c);
+    complexity += c.contribution;
+  }
+
+  if (methodName && hasTrailingLogicAfterControlBlock(code)) {
+    const contribution = 3;
+    contributions.push({
+      line: 1,
+      column: 0,
+      contribution,
+      description: `+${contribution} method mixes a control-flow block with unrelated logic afterward — consider extracting a helper`
+    });
+    complexity += contribution;
+  }
+
   return { totalComplexity: complexity, contributions };
+}
+
+// Single-letter identifiers (d, m, i...) read poorly at a glance. Flags
+// declaration sites only, except i/j/k in a plain for-loop header, which is
+// too idiomatic to penalize.
+const LOOP_COUNTER_NAMES = new Set(['i', 'j', 'k']);
+const FOR_HEADER_LOOKBEHIND_REGEX = /for\s*\(\s*$/;
+const DECLARATION_REGEXES = [
+  /\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\b/g,
+  /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g,
+  // ponytail: known-type allowlist for Apex/Java-style typed declarations; extend if a new type shows up.
+  /\b(?:String|Integer|Boolean|Double|Long|Object|Decimal|Id|Date|DateTime|Blob|List<[^;=()]*>|Map<[^;=()]*>|Set<[^;=()]*>)\s+([A-Za-z_$][\w$]*)\s*[=;]/g
+];
+
+function findCrypticIdentifierContributions(code: string): ComplexityContribution[] {
+  const clean = stripForStructure(code);
+  const lineStarts = computeLineStarts(code);
+  const contributions: ComplexityContribution[] = [];
+  const seen = new Set<number>();
+
+  for (const regex of DECLARATION_REGEXES) {
+    regex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(clean)) !== null) {
+      const name = match[1];
+      if (name.length !== 1) continue;
+
+      if (LOOP_COUNTER_NAMES.has(name)) {
+        const before = clean.slice(Math.max(0, match.index - 30), match.index);
+        if (FOR_HEADER_LOOKBEHIND_REGEX.test(before)) continue;
+      }
+
+      const nameIndex = match.index + match[0].lastIndexOf(name);
+      if (seen.has(nameIndex)) continue;
+      seen.add(nameIndex);
+
+      const line = lineForIndex(lineStarts, nameIndex);
+      contributions.push({
+        line: line + 1,
+        column: nameIndex - lineStarts[line],
+        contribution: 1,
+        description: `+1 cryptic identifier name '${name}' (consider a descriptive name)`
+      });
+    }
+  }
+
+  return contributions;
+}
+
+// An inline regex literal buried in a method with a vague name is bad
+// practice — the caller can't tell what it extracts without reading the
+// pattern. Only checked per-method (methodName provided), since a whole-file
+// score has no single name to judge against.
+const DESCRIPTIVE_NAME_REGEX = /extract|parse|match|regex|pattern|valid|test|find|replace|sanitize|normalize/i;
+const REGEX_LITERAL_REGEX = /(^|[=([{,:!&|;]\s*|\breturn\s+)\/(?:[^\/\\\r\n]|\\.)+\/[a-z]*/g;
+
+function findRegexNamingContributions(code: string, methodName?: string): ComplexityContribution[] {
+  if (!methodName || DESCRIPTIVE_NAME_REGEX.test(methodName)) return [];
+
+  const clean = stripForStructure(code);
+  const lineStarts = computeLineStarts(code);
+  const contributions: ComplexityContribution[] = [];
+
+  REGEX_LITERAL_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = REGEX_LITERAL_REGEX.exec(clean)) !== null) {
+    const slashIndex = match.index + match[1].length;
+    const line = lineForIndex(lineStarts, slashIndex);
+    contributions.push({
+      line: line + 1,
+      column: slashIndex - lineStarts[line],
+      contribution: 2,
+      description: `+2 inline regex in '${methodName}' — extract to a well-named function (e.g. extractX)`
+    });
+  }
+
+  return contributions;
+}
+
+// A method that runs a control-flow block and then keeps going with unrelated
+// logic is doing more than one thing, even without extra nesting. Detects
+// only the first top-level block, once per method (not per occurrence).
+function hasTrailingLogicAfterControlBlock(body: string): boolean {
+  const clean = stripForStructure(body);
+  const openBrace = clean.indexOf('{');
+  if (openBrace === -1) return false;
+  const closeBrace = findMatchingBrace(clean, openBrace);
+  if (closeBrace === -1) return false;
+
+  const controlRegex = /\b(?:if|for|while|switch|do)\b/g;
+  controlRegex.lastIndex = openBrace;
+  const match = controlRegex.exec(clean);
+  if (!match || match.index >= closeBrace) return false;
+
+  const blockBraceOpen = clean.indexOf('{', match.index);
+  if (blockBraceOpen === -1 || blockBraceOpen >= closeBrace) return false;
+  const blockBraceClose = findMatchingBrace(clean, blockBraceOpen);
+  if (blockBraceClose === -1) return false;
+
+  return clean.slice(blockBraceClose + 1, closeBrace).trim().length > 0;
 }
 
 export interface MethodComplexity {
@@ -201,7 +322,7 @@ export function findMethodComplexities(code: string): MethodComplexity[] {
   return findMethodBoundaries(code).map(({ name, line, body }) => ({
     name,
     line,
-    complexity: analyzeCognitiveComplexity(body).totalComplexity
+    complexity: analyzeCognitiveComplexity(body, name).totalComplexity
   }));
 }
 
@@ -354,6 +475,63 @@ const arrow = (c) => {
   assert.strictEqual(methods.find(m => m.name === 'plain')!.complexity, 1);
   assert.strictEqual(methods.find(m => m.name === 'method')!.complexity, 3);
   assert.strictEqual(methods.find(m => m.name === 'arrow')!.complexity, 1);
+
+  // Cryptic identifiers: flagged unless it's i/j/k in a for-loop header.
+  const crypticSample = `
+function useCryptic(a) {
+  let d = a;
+  return d;
+}
+
+function loopOk(n) {
+  for (let i = 0; i < n; i++) {
+    console.log(i);
+  }
+}
+
+function loopBad(n) {
+  for (let q = 0; q < n; q++) {
+    console.log(q);
+  }
+}
+`;
+  const crypticMethods = findMethodComplexities(crypticSample);
+  assert.strictEqual(crypticMethods.find(m => m.name === 'useCryptic')!.complexity, 1);
+  assert.strictEqual(crypticMethods.find(m => m.name === 'loopOk')!.complexity, 1);
+  assert.strictEqual(crypticMethods.find(m => m.name === 'loopBad')!.complexity, 2);
+
+  // Inline regex without a descriptive method name.
+  const regexSample = `
+function handleInput(s) {
+  return /^[a-z]+$/.test(s);
+}
+
+function extractDigits(s) {
+  return /^[0-9]+$/.test(s);
+}
+`;
+  const regexMethods = findMethodComplexities(regexSample);
+  assert.strictEqual(regexMethods.find(m => m.name === 'handleInput')!.complexity, 2);
+  assert.strictEqual(regexMethods.find(m => m.name === 'extractDigits')!.complexity, 0);
+
+  // A method mixing a loop with unrelated trailing logic scores higher.
+  const mixedSample = `
+function mixedResponsibility(items) {
+  for (const item of items) {
+    console.log(item);
+  }
+  return items.length;
+}
+
+function loopOnly(items) {
+  for (const item of items) {
+    console.log(item);
+  }
+}
+`;
+  const mixedMethods = findMethodComplexities(mixedSample);
+  assert.strictEqual(mixedMethods.find(m => m.name === 'loopOnly')!.complexity, 1);
+  assert.strictEqual(mixedMethods.find(m => m.name === 'mixedResponsibility')!.complexity, 4);
 
   console.log('complexity.ts self-check passed');
 }

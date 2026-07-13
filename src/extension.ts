@@ -15,7 +15,7 @@ const codeLensEmitter = new vscode.EventEmitter<void>();
 // Each lens carries its own method body so scoring (analyzeCognitiveComplexity)
 // happens lazily in resolveCodeLens, per-lens, instead of all at once up front.
 class MethodCodeLens extends vscode.CodeLens {
-  constructor(range: vscode.Range, public body: string) {
+  constructor(range: vscode.Range, public body: string, public name: string) {
     super(range);
   }
 }
@@ -25,12 +25,12 @@ const codeLensProvider: vscode.CodeLensProvider = {
   provideCodeLenses(document) {
     if (!isSupportedLanguage(document.languageId)) return [];
     return findMethodBoundaries(document.getText()).map(
-      method => new MethodCodeLens(new vscode.Range(method.line, 0, method.line, 0), method.body)
+      method => new MethodCodeLens(new vscode.Range(method.line, 0, method.line, 0), method.body, method.name)
     );
   },
   resolveCodeLens(codeLens) {
     if (codeLens instanceof MethodCodeLens) {
-      const complexity = analyzeCognitiveComplexity(codeLens.body).totalComplexity;
+      const complexity = analyzeCognitiveComplexity(codeLens.body, codeLens.name).totalComplexity;
       codeLens.command = { title: `Cognitive Complexity: ${complexity}`, command: 'cognitiveComplexity.refresh' };
     }
     return codeLens;
