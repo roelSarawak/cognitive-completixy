@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
-import { calculateCognitiveComplexity, analyzeCognitiveComplexity, ComplexityContribution } from './complexity';
+import { calculateCognitiveComplexity, analyzeCognitiveComplexity, findMethodBoundaries, ComplexityContribution } from './complexity';
+
+const SUPPORTED_LANGUAGES = ['javascript', 'typescript', 'javascriptreact', 'typescriptreact', 'apex'];
 
 let statusBarItem: vscode.StatusBarItem;
 let timeout: NodeJS.Timeout | undefined;
@@ -7,6 +9,33 @@ let hintsVisible = false;
 let infoDecorationType: vscode.TextEditorDecorationType;
 let warningDecorationType: vscode.TextEditorDecorationType;
 let errorDecorationType: vscode.TextEditorDecorationType;
+
+const codeLensEmitter = new vscode.EventEmitter<void>();
+
+// Each lens carries its own method body so scoring (analyzeCognitiveComplexity)
+// happens lazily in resolveCodeLens, per-lens, instead of all at once up front.
+class MethodCodeLens extends vscode.CodeLens {
+  constructor(range: vscode.Range, public body: string) {
+    super(range);
+  }
+}
+
+const codeLensProvider: vscode.CodeLensProvider = {
+  onDidChangeCodeLenses: codeLensEmitter.event,
+  provideCodeLenses(document) {
+    if (!isSupportedLanguage(document.languageId)) return [];
+    return findMethodBoundaries(document.getText()).map(
+      method => new MethodCodeLens(new vscode.Range(method.line, 0, method.line, 0), method.body)
+    );
+  },
+  resolveCodeLens(codeLens) {
+    if (codeLens instanceof MethodCodeLens) {
+      const complexity = analyzeCognitiveComplexity(codeLens.body).totalComplexity;
+      codeLens.command = { title: `Cognitive Complexity: ${complexity}`, command: 'cognitiveComplexity.refresh' };
+    }
+    return codeLens;
+  }
+};
 
 export function activate(context: vscode.ExtensionContext) {
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -40,6 +69,8 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(infoDecorationType, warningDecorationType, errorDecorationType);
 
+  context.subscriptions.push(vscode.languages.registerCodeLensProvider(SUPPORTED_LANGUAGES, codeLensProvider));
+
   const refreshCommand = vscode.commands.registerCommand('cognitiveComplexity.refresh', toggleHints);
   context.subscriptions.push(refreshCommand);
 
@@ -57,7 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 function debounceUpdate() {
   if (timeout) clearTimeout(timeout);
-  timeout = setTimeout(updateComplexity, 700);
+  timeout = setTimeout(updateComplexity, 300);
 }
 
 function updateComplexity() {
@@ -75,10 +106,12 @@ function updateComplexity() {
   statusBarItem.color = undefined;
   statusBarItem.tooltip = `Cognitive Complexity: ${complexity} - ${level}`;
   statusBarItem.show();
+
+  codeLensEmitter.fire();
 }
 
 function isSupportedLanguage(languageId: string): boolean {
-  return ['javascript', 'typescript', 'javascriptreact', 'typescriptreact'].includes(languageId);
+  return SUPPORTED_LANGUAGES.includes(languageId);
 }
 
 function getComplexityLevel(complexity: number): string {

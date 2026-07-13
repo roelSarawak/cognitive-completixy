@@ -2,7 +2,7 @@
   "name": "cognitive-complexity",
   "displayName": "Cognitive Complexity",
   "description": "Display cognitive complexity of active file in status bar",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "Vladstudio",
   "author": {
     "name": "Vlad Gerasimov",
@@ -22,6 +22,7 @@
     "metrics",
     "javascript",
     "typescript",
+    "apex",
     "linter"
   ],
   "icon": "logo.png",
@@ -35,7 +36,8 @@
     "onLanguage:javascript",
     "onLanguage:typescript",
     "onLanguage:javascriptreact",
-    "onLanguage:typescriptreact"
+    "onLanguage:typescriptreact",
+    "onLanguage:apex"
   ],
   "main": "./out/extension.js",
   "contributes": {

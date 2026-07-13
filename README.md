@@ -1,6 +1,6 @@
 # Cognitive Complexity
 
-A VS Code extension that displays the cognitive complexity of JavaScript/TypeScript code in your status bar.
+A VS Code extension that displays the cognitive complexity of JavaScript/TypeScript/Apex code in your status bar.
 
 ## Features
 
@@ -9,11 +9,11 @@ A VS Code extension that displays the cognitive complexity of JavaScript/TypeScr
 - **Inline hints** - Click the status bar to toggle detailed complexity hints showing exactly what contributes to complexity
 - **Color-coded hints** - Blue for low impact (+1), yellow for moderate (+2-3), red for high impact (+4+)
 
-Supports JavaScript, TypeScript, JSX, and TSX files.
+Supports JavaScript, TypeScript, JSX, TSX, and Apex files.
 
 ## Usage
 
-The extension automatically activates when you open JS/TS files. The status bar shows `CC X` where X is the complexity score, followed by visual indicators for complexity level.
+The extension automatically activates when you open JS/TS/Apex files. The status bar shows `CC X` where X is the complexity score, followed by visual indicators for complexity level.
 
 Click the complexity indicator to toggle inline hints that show exactly which lines contribute to complexity and by how much.
 

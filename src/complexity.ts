@@ -137,6 +137,133 @@ export function analyzeCognitiveComplexity(code: string): {
   return { totalComplexity: complexity, contributions };
 }
 
+export interface MethodComplexity {
+  name: string;
+  line: number; // 0-based
+  complexity: number;
+}
+
+export interface MethodBoundary {
+  name: string;
+  line: number; // 0-based
+  body: string;
+}
+
+const CONTROL_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch']);
+
+// ponytail: heuristic regex-based function detection, not a real parser.
+// Misses decorated methods and object-literal arrow properties.
+// Upgrade path: swap in a real per-language parser if that becomes a problem.
+export function findMethodBoundaries(code: string): MethodBoundary[] {
+  const clean = stripForStructure(code);
+  const lineStarts = computeLineStarts(code);
+  const byBrace = new Map<number, { index: number; name: string }>();
+
+  const functionRegex = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = functionRegex.exec(clean)) !== null) {
+    const parenOpen = m.index + m[0].length - 1;
+    const parenClose = findMatchingParen(clean, parenOpen);
+    if (parenClose === -1) continue;
+    const braceIndex = findBodyBrace(clean, parenClose + 1);
+    if (braceIndex === -1) continue;
+    byBrace.set(braceIndex, { index: m.index, name: m[1] });
+  }
+
+  const methodRegex = /\b([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?::\s*[\w<>[\],\s]+)?\s*\{/g;
+  while ((m = methodRegex.exec(clean)) !== null) {
+    const name = m[1];
+    if (CONTROL_KEYWORDS.has(name)) continue;
+    const braceIndex = m.index + m[0].length - 1;
+    if (!byBrace.has(braceIndex)) byBrace.set(braceIndex, { index: m.index, name });
+  }
+
+  const arrowRegex = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^;{}]*\)\s*(?::[^=]+)?=>\s*\{/g;
+  while ((m = arrowRegex.exec(clean)) !== null) {
+    const braceIndex = m.index + m[0].length - 1;
+    if (!byBrace.has(braceIndex)) byBrace.set(braceIndex, { index: m.index, name: m[1] });
+  }
+
+  const boundaries: MethodBoundary[] = [];
+  for (const [braceIndex, { index, name }] of byBrace) {
+    const endIndex = findMatchingBrace(clean, braceIndex);
+    if (endIndex === -1) continue;
+    boundaries.push({ name, line: lineForIndex(lineStarts, index), body: code.slice(index, endIndex + 1) });
+  }
+
+  return boundaries.sort((a, b) => a.line - b.line);
+}
+
+// Convenience wrapper that also scores each method. Prefer findMethodBoundaries()
+// when the caller wants to defer/stagger the (cheap but non-zero) scoring pass,
+// e.g. a CodeLens provider resolving lenses lazily per-method.
+export function findMethodComplexities(code: string): MethodComplexity[] {
+  return findMethodBoundaries(code).map(({ name, line, body }) => ({
+    name,
+    line,
+    complexity: analyzeCognitiveComplexity(body).totalComplexity
+  }));
+}
+
+function findBodyBrace(clean: string, from: number): number {
+  const rest = clean.slice(from);
+  const match = rest.match(/^[^{;=]*\{/);
+  return match ? from + match[0].length - 1 : -1;
+}
+
+function findMatchingParen(clean: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < clean.length; i++) {
+    if (clean[i] === '(') depth++;
+    else if (clean[i] === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function findMatchingBrace(clean: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < clean.length; i++) {
+    if (clean[i] === '{') depth++;
+    else if (clean[i] === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Same comment/string stripping as tokenizeWithPositions, but preserves length
+// and newlines so indices/line numbers still map back to the original source.
+function stripForStructure(code: string): string {
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, (s) => s.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (s) => ' '.repeat(s.length))
+    .replace(/"(?:[^"\\]|\\.)*"/g, (s) => ' '.repeat(s.length))
+    .replace(/'(?:[^'\\]|\\.)*'/g, (s) => ' '.repeat(s.length))
+    .replace(/`(?:[^`\\]|\\.)*`/g, (s) => ' '.repeat(s.length));
+}
+
+function computeLineStarts(code: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] === '\n') starts.push(i + 1);
+  }
+  return starts;
+}
+
+function lineForIndex(lineStarts: number[], index: number): number {
+  let lo = 0, hi = lineStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lineStarts[mid] <= index) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
 interface TokenWithPosition {
   token: string;
   line: number;
@@ -192,4 +319,41 @@ function isLabel(token: string): boolean {
 
 function isNumber(token: string): boolean {
   return /^\d+$/.test(token);
+}
+
+if (require.main === module) {
+  const assert = require('assert');
+
+  const sample = `
+function plain(a) {
+  if (a) {
+    return 1;
+  }
+}
+
+class Foo {
+  method(b) {
+    if (b) {
+      if (b > 1) {
+        return 2;
+      }
+    }
+  }
+}
+
+const arrow = (c) => {
+  for (let i = 0; i < c; i++) {
+    console.log(i);
+  }
+};
+`;
+
+  const methods = findMethodComplexities(sample);
+  assert.strictEqual(methods.length, 3, `expected 3 methods, got ${methods.length}`);
+  assert.deepStrictEqual(methods.map(m => m.name), ['plain', 'method', 'arrow']);
+  assert.strictEqual(methods.find(m => m.name === 'plain')!.complexity, 1);
+  assert.strictEqual(methods.find(m => m.name === 'method')!.complexity, 3);
+  assert.strictEqual(methods.find(m => m.name === 'arrow')!.complexity, 1);
+
+  console.log('complexity.ts self-check passed');
 }
