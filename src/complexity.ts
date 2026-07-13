@@ -151,7 +151,7 @@ export interface MethodBoundary {
 
 const CONTROL_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch']);
 
-// ponytail: heuristic regex-based function detection, not a real parser.
+// Note: Heuristic regex-based function detection, not a real parser.
 // Misses decorated methods and object-literal arrow properties.
 // Upgrade path: swap in a real per-language parser if that becomes a problem.
 export function findMethodBoundaries(code: string): MethodBoundary[] {
